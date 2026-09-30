@@ -2,7 +2,7 @@
   "buildCommand": "npm run build",
   "functions": {
     "server.ts": {
-      "includeFiles": ["public/**"]
+      "includeFiles": "public/**"
     }
   }
 }
