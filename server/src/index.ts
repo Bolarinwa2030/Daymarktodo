@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import Fastify from 'fastify'
-import fastifyStatic from '@fastify/static'
 import { categories, getTaskStorage, priorities, type Category, type Priority, type Task, type TaskInput } from './storage.js'
 
 const app = Fastify({ logger: true })
@@ -13,14 +13,6 @@ app.setErrorHandler((error, request, reply) => {
   }
   return reply.code(500).send({ error: 'Internal server error.' })
 })
-
-if (process.env.VERCEL) {
-  await app.register(fastifyStatic, {
-    root: path.resolve(process.cwd(), 'public'),
-    prefix: '/',
-    wildcard: false,
-  })
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -127,11 +119,56 @@ app.delete<{ Params: { id: string } }>('/api/tasks/:id', async (request, reply) 
 })
 
 if (process.env.VERCEL) {
-  app.setNotFoundHandler((request, reply) => {
-    if (request.method === 'GET' && !request.url.startsWith('/api/')) {
-      return reply.sendFile('index.html')
+  const publicDirectory = path.resolve(process.cwd(), 'public')
+  const contentTypes: Record<string, string> = {
+    '.css': 'text/css; charset=utf-8',
+    '.html': 'text/html; charset=utf-8',
+    '.ico': 'image/x-icon',
+    '.js': 'text/javascript; charset=utf-8',
+    '.json': 'application/json; charset=utf-8',
+    '.png': 'image/png',
+    '.svg': 'image/svg+xml',
+    '.woff2': 'font/woff2',
+  }
+
+  app.setNotFoundHandler(async (request, reply) => {
+    if (request.method !== 'GET' || request.url.startsWith('/api/')) {
+      return reply.code(404).send({ error: 'Not found.' })
     }
-    return reply.code(404).send({ error: 'Not found.' })
+
+    const pathname = new URL(request.url, 'http://localhost').pathname
+    let relativePath: string
+    try {
+      relativePath = decodeURIComponent(pathname).replace(/^\/+/, '') || 'index.html'
+    } catch {
+      return reply.code(404).send({ error: 'Not found.' })
+    }
+
+    let filePath = path.resolve(publicDirectory, relativePath)
+    if (!filePath.startsWith(`${publicDirectory}${path.sep}`)) {
+      return reply.code(404).send({ error: 'Not found.' })
+    }
+
+    let contents: Buffer
+    try {
+      contents = await readFile(filePath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      if (path.extname(pathname)) return reply.code(404).send({ error: 'Not found.' })
+
+      filePath = path.join(publicDirectory, 'index.html')
+      contents = await readFile(filePath)
+    }
+
+    const extension = path.extname(filePath)
+    const cacheControl = extension === '.html'
+      ? 'no-cache'
+      : 'public, max-age=31536000, immutable'
+
+    return reply
+      .type(contentTypes[extension] ?? 'application/octet-stream')
+      .header('cache-control', cacheControl)
+      .send(contents)
   })
 }
 
