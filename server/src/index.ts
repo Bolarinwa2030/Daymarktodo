@@ -1,83 +1,25 @@
 import { randomUUID } from 'node:crypto'
-import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import Fastify from 'fastify'
-import Database from 'better-sqlite3'
-
-const categories = ['Personal', 'Work', 'Wellbeing', 'Learning'] as const
-const priorities = ['low', 'medium', 'high'] as const
-
-type Category = (typeof categories)[number]
-type Priority = (typeof priorities)[number]
-
-interface Task {
-  id: string
-  title: string
-  description: string
-  category: Category
-  priority: Priority
-  dueDate: string | null
-  completed: boolean
-  createdAt: string
-  updatedAt: string
-}
-
-interface TaskRow extends Omit<Task, 'completed'> {
-  completed: number
-}
-
-interface TaskInput {
-  title?: string
-  description?: string
-  category?: Category
-  priority?: Priority
-  dueDate?: string | null
-  completed?: boolean
-}
-
-const dataDirectory = path.resolve(process.cwd(), 'data')
-mkdirSync(dataDirectory, { recursive: true })
-const database = new Database(path.join(dataDirectory, 'daymark.sqlite'))
-database.pragma('journal_mode = WAL')
-database.exec(`
-  CREATE TABLE IF NOT EXISTS tasks (
-    id TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    category TEXT NOT NULL,
-    priority TEXT NOT NULL,
-    due_date TEXT,
-    completed INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-  )
-`)
+import fastifyStatic from '@fastify/static'
+import { categories, getTaskStorage, priorities, type Category, type Priority, type Task, type TaskInput } from './storage.js'
 
 const app = Fastify({ logger: true })
 
-function fromRow(row: TaskRow): Task {
-  return {
-    id: row.id,
-    title: row.title,
-    description: row.description,
-    category: row.category,
-    priority: row.priority,
-    dueDate: row.dueDate,
-    completed: Boolean(row.completed),
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
+app.setErrorHandler((error, request, reply) => {
+  request.log.error(error)
+  if (process.env.VERCEL && !process.env.DATABASE_URL) {
+    return reply.code(503).send({ error: 'Database not configured. Set DATABASE_URL in the Vercel project.' })
   }
-}
+  return reply.code(500).send({ error: 'Internal server error.' })
+})
 
-function findTask(id: string): Task | undefined {
-  const row = database.prepare(`
-    SELECT id, title, description, category, priority,
-      due_date AS dueDate, completed,
-      created_at AS createdAt, updated_at AS updatedAt
-    FROM tasks WHERE id = ?
-  `).get(id) as TaskRow | undefined
-
-  return row ? fromRow(row) : undefined
+if (process.env.VERCEL) {
+  await app.register(fastifyStatic, {
+    root: path.resolve(process.cwd(), 'public'),
+    prefix: '/',
+    wildcard: false,
+  })
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -138,17 +80,7 @@ function parseInput(body: unknown, partial: boolean): { value?: TaskInput; error
 
 app.get('/api/health', async () => ({ status: 'ok' }))
 
-app.get('/api/tasks', async () => {
-  const rows = database.prepare(`
-    SELECT id, title, description, category, priority,
-      due_date AS dueDate, completed,
-      created_at AS createdAt, updated_at AS updatedAt
-    FROM tasks
-    ORDER BY completed ASC, created_at DESC
-  `).all() as TaskRow[]
-
-  return rows.map(fromRow)
-})
+app.get('/api/tasks', async () => (await getTaskStorage()).list())
 
 app.post('/api/tasks', async (request, reply) => {
   const parsed = parseInput(request.body, false)
@@ -167,16 +99,14 @@ app.post('/api/tasks', async (request, reply) => {
     updatedAt: now,
   }
 
-  database.prepare(`
-    INSERT INTO tasks (id, title, description, category, priority, due_date, completed, created_at, updated_at)
-    VALUES (@id, @title, @description, @category, @priority, @dueDate, @completed, @createdAt, @updatedAt)
-  `).run({ ...task, completed: 0 })
+  await (await getTaskStorage()).insert(task)
 
   return reply.code(201).send(task)
 })
 
 app.patch<{ Params: { id: string } }>('/api/tasks/:id', async (request, reply) => {
-  const current = findTask(request.params.id)
+  const storage = await getTaskStorage()
+  const current = await storage.get(request.params.id)
   if (!current) return reply.code(404).send({ error: 'Task not found.' })
 
   const parsed = parseInput(request.body, true)
@@ -185,21 +115,24 @@ app.patch<{ Params: { id: string } }>('/api/tasks/:id', async (request, reply) =
   }
 
   const updated: Task = { ...current, ...parsed.value, updatedAt: new Date().toISOString() }
-  database.prepare(`
-    UPDATE tasks SET title = @title, description = @description,
-      category = @category, priority = @priority, due_date = @dueDate,
-      completed = @completed, updated_at = @updatedAt
-    WHERE id = @id
-  `).run({ ...updated, completed: updated.completed ? 1 : 0 })
+  await storage.update(updated)
 
   return updated
 })
 
 app.delete<{ Params: { id: string } }>('/api/tasks/:id', async (request, reply) => {
-  const result = database.prepare('DELETE FROM tasks WHERE id = ?').run(request.params.id)
-  if (result.changes === 0) return reply.code(404).send({ error: 'Task not found.' })
+  const deleted = await (await getTaskStorage()).delete(request.params.id)
+  if (!deleted) return reply.code(404).send({ error: 'Task not found.' })
   return reply.code(204).send()
 })
 
-const port = Number(process.env.PORT ?? 3001)
-await app.listen({ port, host: '0.0.0.0' })
+if (process.env.VERCEL) {
+  app.setNotFoundHandler((request, reply) => {
+    if (request.method === 'GET' && !request.url.startsWith('/api/')) {
+      return reply.sendFile('index.html')
+    }
+    return reply.code(404).send({ error: 'Not found.' })
+  })
+}
+
+export default app

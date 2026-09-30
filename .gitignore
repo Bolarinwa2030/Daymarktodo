@@ -1,6 +1,7 @@
 node_modules/
 client/dist/
 server/dist/
+public/
 server/data/*.sqlite
 server/data/*.sqlite-*
 .env

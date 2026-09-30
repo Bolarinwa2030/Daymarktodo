@@ -1,6 +1,10 @@
 {
   "name": "daymark-todo",
   "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "workspaces": [
     "client",
     "server"

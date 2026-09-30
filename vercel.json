@@ -1,0 +1,8 @@
+{
+  "buildCommand": "npm run build",
+  "functions": {
+    "server.ts": {
+      "includeFiles": ["public/**"]
+    }
+  }
+}
